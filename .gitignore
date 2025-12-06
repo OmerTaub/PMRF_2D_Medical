@@ -1,0 +1,61 @@
+########################
+# Python
+########################
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+*.env
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Tests & caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+########################
+# IDE / OS junk
+########################
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+########################
+# Logs & temp files
+########################
+*.log
+*.tmp
+*.bak
+
+########################
+# Checkpoints / models
+########################
+*.ckpt
+*.pth
+*.pt
+checkpoints/*.ckpt
+
+########################
+# Experiment tracking
+########################
+wandb/
+
+########################
+# Misc
+########################
+*.ipynb_checkpoints/
+
+
