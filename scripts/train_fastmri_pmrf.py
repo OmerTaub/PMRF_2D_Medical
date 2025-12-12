@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -141,12 +142,24 @@ def main(args):
             "Specify at most one of --val_sample_rate or --val_volume_sample_rate, not both."
         )
 
+    output_dir: Optional[Path] = None
+    if args.output_dir is not None:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
     logger = WandbLogger(
         project=args.wandb_project_name,
         group=args.wandb_group,
         id=args.wandb_id,
+        name=args.wandb_run_name,
     )
     logger.log_hyperparams(vars(args))
+
+    # Save a copy of the run configuration to the experiment directory, if provided.
+    if output_dir is not None:
+        config_path = output_dir / "config.json"
+        with config_path.open("w") as f:
+            json.dump(vars(args), f, indent=2, sort_keys=True, default=str)
 
     train_data, val_data = create_datasets(args)
 
@@ -190,7 +203,10 @@ def main(args):
         num_workers=args.num_workers // args.num_gpus,
     )
 
-    ckpt_callback = ModelCheckpoint(save_last=True)
+    ckpt_callback = ModelCheckpoint(
+        dirpath=str(output_dir) if output_dir is not None else None,
+        save_last=True,
+    )
     lr_monitor_callback = LearningRateMonitor()
     trainer = Trainer(
         logger=logger,
@@ -535,11 +551,25 @@ if __name__ == "__main__":
         help="Optional W&B run ID (for resuming runs).",
     )
     parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        required=False,
+        default=None,
+        help="Optional W&B run display name.",
+    )
+    parser.add_argument(
         "--resume_from_ckpt",
         type=str,
         required=False,
         default=None,
         help="Optional checkpoint path to resume training.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=False,
+        default=None,
+        help="Optional directory to save checkpoints and logs.",
     )
 
     # ---------------- debugging / overfitting options ----------------

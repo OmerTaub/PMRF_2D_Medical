@@ -5,9 +5,15 @@ set -e
 TRAIN_DATA_ROOT="/home/omertaub/data/knee_demo/singlecoil_train"
 VAL_DATA_ROOT="/home/omertaub/data/knee_demo/singlecoil_val"
 
+# Experiment naming and output directory
+# Change EXP_NAME and OUTPUT_DIR per experiment to control run name and
+# where checkpoints/logs are written.
+EXP_NAME="fastmri_mmse_experiment_accel_4_center_fraction_04"
+OUTPUT_DIR="experiments/${EXP_NAME}"
+
 # Undersampling mask parameters
-MASK_TYPE="random"       # "random" or "cartesian"
-CENTER_FRACTION=0.08     # fraction of fully-sampled low-frequency k-space
+MASK_TYPE="cartesian"       # "random" or "cartesian"
+CENTER_FRACTION=0.04     # fraction of fully-sampled low-frequency k-space
 ACCEL=4                  # acceleration factor (e.g., 4, 8)
 
 python scripts/train_fastmri_pmrf.py \
@@ -17,8 +23,8 @@ python scripts/train_fastmri_pmrf.py \
   --stage "mmse" \
   --arch "swinir_M" \
   --num_gpus 1 \
-  --train_batch_size 1 \
-  --val_batch_size 1 \
+  --train_batch_size 4 \
+  --val_batch_size 4 \
   --synthetic_mask_type "$MASK_TYPE" \
   --synthetic_accel $ACCEL \
   --synthetic_center_fraction $CENTER_FRACTION \
@@ -30,7 +36,9 @@ python scripts/train_fastmri_pmrf.py \
   --eps 0.0 \
   --t_schedule "stratified_uniform" \
   --weight_decay 1e-4 \
-  --lr 1e-4 \
+  --lr 1e-6 \
   --wandb_project_name "PMRF_fastmri" \
   --wandb_group "fastmri_mmse" \
+  --wandb_run_name "$EXP_NAME" \
+  --output_dir "$OUTPUT_DIR"
 #   --overfit_single_slice_index 15 # if this option is on - the num_gpus and batch_size must be 1

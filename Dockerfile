@@ -1,0 +1,23 @@
+FROM omertaub1/mip:engrf-amd64
+
+# Install SSH server and rsync
+RUN apt-get update && apt-get install -y openssh-server rsync
+
+# Prepare SSH
+RUN mkdir /var/run/sshd
+
+# Set root password (temporary; later you can switch to keys)
+RUN echo 'root:root' | chpasswd
+
+# Allow root login and relax PAM requirement
+RUN sed -i 's/#*PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+RUN sed -i 's/session\s*required\s*pam_loginuid.so/session optional pam_loginuid.so/' /etc/pam.d/sshd
+
+# Expose SSH port
+EXPOSE 22
+
+# Default working directory on storage
+WORKDIR /storage/
+
+# Start sshd when the container runs
+CMD ["/usr/sbin/sshd", "-D"]
