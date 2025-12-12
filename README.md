@@ -29,13 +29,6 @@ The core logic lives in the upstream `PMRF` submodule (Lightning module `MMSERec
 - Access to the **fastMRI** dataset (knee or brain, singlecoil or multicoil)
 - Optional: [Weights & Biases](https://wandb.ai) account for logging (used by default in the training scripts)
 
-Make sure the `PMRF` submodule is initialized and up to date:
-
-```bash
-git submodule update --init --recursive
-```
-
----
 
 ### Data preparation (fastMRI)
 
