@@ -1,6 +1,6 @@
 ## PMRF 2D Medical (fastMRI)
 
-This repository wraps the [`PMRF`](PMRF) implementation of *Posterior-Mean Rectified Flow (PMRF)* and adapts it to 2D medical image reconstruction on the fastMRI knee dataset.
+This repository wraps the PMRF implementation of *Posterior-Mean Rectified Flow (PMRF)* and adapts it to 2D medical image reconstruction on the fastMRI knee dataset.
 It provides:
 
 - **MMSE estimator training** on undersampled fastMRI slices.
