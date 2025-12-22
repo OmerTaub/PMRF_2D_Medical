@@ -1,0 +1,31 @@
+runai delete job myssh -p hayit 
+runai submit myssh   --pvc=storage:/storage   --add-capability AUDIT_WRITE   --add-capability SYS_CHROOT   -g 0.1   -i omertaub1/mip-ssh
+runai port-forward myssh --port 2222:22
+
+
+
+runai submit \
+  --name=train-pmrf-mmse \
+  --large-shm \
+  --pvc=storage:/storage \
+  --add-capability AUDIT_WRITE \
+  --add-capability SYS_CHROOT \
+  --backoff-limit=0 \
+  --gpu-memory 16G \
+  -i omertaub1/mip-ssh \
+  --node-pool blaufer \
+  --command -- bash -c "cd /storage/omer/PMRF_2D_Medical && source venv_engrf/bin/activate && ./scripts/train_mmse.sh"
+
+runai submit \
+  --name=train-pmrf-mmse-8 \
+  --large-shm \
+  --pvc=storage:/storage \
+  --add-capability AUDIT_WRITE \
+  --add-capability SYS_CHROOT \
+  --backoff-limit=0 \
+  -i omertaub1/mip-ssh \
+  -g 1.0 \
+  --node-pool faculty \
+  --command -- bash -c "cd /storage/omer/PMRF_2D_Medical && source venv_engrf/bin/activate && ./scripts/train_mmse.sh"
+
+runai delete job train-pmrf-mmse -p hayit 
