@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -e
+source ~/.wandb_key.sh
+
 
 # Edit these paths and mask settings for your setup
 TRAIN_DATA_ROOT="/home/omertaub/data/knee_demo/singlecoil_train"
