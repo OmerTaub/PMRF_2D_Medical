@@ -468,3 +468,64 @@ class VanillaSliceData(Dataset):
             "y": normalized_image_sub,
         }
         return sample
+
+
+
+class ComplexDataTransform:
+    """
+    Data Transformer with ComplexDataTransform normalization/scaling logic.
+    - std = mean(|y|) computed from zero-filled image y (per-slice)
+    - normalize image (y), target (x), and masked_kspace by the same (mean=0, std)
+    - returns the same tuple structure as DataTransform
+    """
+
+    def __init__(self, resolution, which_challenge, mask_func=None, use_seed=True):
+        if which_challenge not in ("singlecoil", "multicoil"):
+            raise ValueError('Challenge should either be "singlecoil" or "multicoil"')
+        self.mask_func = mask_func
+        self.resolution = resolution
+        self.which_challenge = which_challenge
+        self.use_seed = use_seed
+
+    def __call__(self, kspace, mask, target, attrs, fname, slice):
+        kspace = transforms.to_tensor(kspace)
+
+        # Apply mask (exactly like DataTransform2)
+        if self.mask_func:
+            seed = None if not self.use_seed else tuple(map(ord, fname))
+            masked_kspace, mask = transforms.apply_mask(kspace, self.mask_func, seed)
+        else:
+            masked_kspace = kspace  # (like DataTransform2)
+
+        # IFFT to image space
+        image = transforms.ifft2(masked_kspace)  # zero-filled y
+        target = transforms.ifft2(kspace)        # fully-sampled x
+
+        # Optional center crop (DataTransform2 did not crop; keep if you need it)
+        if self.resolution is not None:
+            crop_shape = (self.resolution, self.resolution)
+            image = transforms.complex_center_crop(image, crop_shape)
+            target = transforms.complex_center_crop(target, crop_shape)
+
+        # Compute normalization stats from |y|
+        abs_image = transforms.complex_abs(image)
+        mean = torch.tensor(0.0)
+        std = abs_image.mean()
+
+        # Normalize image/target/masked_kspace (complex 2-ch) by same std
+        image = image.permute(2, 0, 1)   # (2, H, W)
+        target = target.permute(2, 0, 1) # (2, H, W)
+
+        image = transforms.normalize(image, mean, std, eps=0.0)
+        target = transforms.normalize(target, mean, std, eps=0.0)
+
+        masked_kspace = masked_kspace.permute(2, 0, 1)
+        masked_kspace = transforms.normalize(masked_kspace, mean, std, eps=0.0)
+
+        sample = {
+            "x": target,
+            "y": image,
+            "mean": mean,
+            "std": std,
+        }
+        return sample

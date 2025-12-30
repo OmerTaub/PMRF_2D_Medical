@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -e
-# source ~/.wandb_key.sh
+source /storage/omer/PMRF_2D_Medical/scripts/wandb_key.sh
 
 # Edit these paths and mask settings for your setup
-TRAIN_DATA_ROOT="/home/omertaub/data/knee_demo/singlecoil_train"
-VAL_DATA_ROOT="/home/omertaub/data/knee_demo/singlecoil_val"
+TRAIN_DATA_ROOT="/storage/omer/data/fastmri/singlecoil_train"
+VAL_DATA_ROOT="/storage/omer/data/fastmri/singlecoil_val"
 
 # Experiment naming and output directory
 # Change EXP_NAME and OUTPUT_DIR per experiment to control run name and
 # where checkpoints/logs are written.
-EXP_NAME="fastmri_mmse_experiment_accel_4_center_fraction_04"
+EXP_NAME="fastmri_mmse_experiment_accel_4_center_fraction_04_latest_norm_divide_mean_continue_training_lr_1e-4"
 OUTPUT_DIR="experiments/${EXP_NAME}"
 
 # Undersampling mask parameters
@@ -29,22 +29,23 @@ python train_fastmri_pmrf.py \
   --stage "mmse" \
   --arch "swinir_M" \
   --num_gpus 1 \
-  --train_batch_size 4 \
-  --val_batch_size 4 \
+  --train_batch_size 8 \
+  --val_batch_size 8 \
   --mask_type "$MASK_TYPE" \
   --accelerations $ACCEL \
   --center_fractions $CENTER_FRACTION \
   --scale_mode "$SCALE_MODE" \
   --scale_percentile $SCALE_PERCENTILE \
   --resolution 320 \
-  --num_workers 1 \
+  --num_workers 4 \
   --max_epochs 100000 \
   --ema_decay -1 \
   --eps 0.0 \
   --t_schedule "stratified_uniform" \
   --weight_decay 0 \
-  --lr 2e-4 \
+  --lr 1e-4 \
   --wandb_project_name "PMRF_fastmri" \
   --wandb_group "fastmri_mmse" \
   --wandb_run_name "$EXP_NAME" \
   --output_dir "$OUTPUT_DIR" \
+  --resume_from_ckpt "/storage/omer/PMRF_2D_Medical/experiments/fastmri_mmse_experiment_accel_4_center_fraction_04_latest_norm_divide_mean/epoch=19-step=86860.ckpt"

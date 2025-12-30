@@ -8,6 +8,7 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+venv_engrf/
 env/
 .env
 *.env
@@ -52,6 +53,11 @@ checkpoints/*.ckpt
 # Experiment tracking
 ########################
 wandb/
+experiments/
+experiments_flow/
+
+# Local secrets (never commit)
+scripts/wandb_key.sh
 
 ########################
 # Misc

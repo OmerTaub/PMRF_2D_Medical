@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+
+# Copy this file to `wandb_key.sh` (which is gitignored) and put your key there:
+#   cp scripts/wandb_key.sh.example scripts/wandb_key.sh
+#
+# Recommended: set the env var in your shell/profile instead of a file:
+#   export WANDB_API_KEY="YOUR_KEY_HERE"
+export WANDB_API_KEY="YOUR_KEY_HERE"
+
+

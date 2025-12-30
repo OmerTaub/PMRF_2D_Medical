@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader, Dataset, Subset
 import torch
 import os
-from data import SliceData, VanillaSliceData, DataTransform, create_mask_for_mask_type
+from data import SliceData, VanillaSliceData, DataTransform, ComplexDataTransform, create_mask_for_mask_type
 import pathlib
 
 # Ensure project root and PMRF subdir are on sys.path so that
@@ -55,19 +55,19 @@ def _create_dataset(
     # In our fastMRI setup, data_path already points directly to the directory
     # containing the .h5 files (e.g. /.../singlecoil_train), so we should not
     # append an extra subdirectory such as "train" or "val" here.
-    # dataset = SliceData(
-    #     root=Path(data_path),
-    #     transform=data_transform,
-    #     challenge=args.challenge,
-    #     sequence=sequence,
-    #     sample_rate=sample_rate,
-    # )
-    dataset = VanillaSliceData(
-        root=data_path,
+    dataset = SliceData(
+        root=Path(data_path),
+        transform=data_transform,
         challenge=args.challenge,
-        sample_rate=args.sample_rate,
-        mask_func=mask_func,
+        sequence=sequence,
+        sample_rate=sample_rate,
     )
+    # dataset = VanillaSliceData(
+    #     root=data_path,
+    #     challenge=args.challenge,
+    #     sample_rate=args.sample_rate,
+    #     mask_func=mask_func,
+    # )
     if display:
         dataset = [dataset[i] for i in range(100, 108)]
 
@@ -175,6 +175,18 @@ def main(args):
             scale_mode=args.scale_mode,
             scale_percentile=args.scale_percentile,
         )
+        # train_data_transform = ComplexDataTransform(
+        #     args.resolution,
+        #     args.challenge,
+        #     mask,
+        #     use_seed=True,
+        # )
+        # val_data_transform = ComplexDataTransform(
+        #     args.resolution,
+        #     args.challenge,
+        #     mask,
+        #     use_seed=True,
+        # )
 
         if args.phase == 'train':
             train_loader = _create_dataset(
