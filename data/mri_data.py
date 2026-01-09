@@ -242,59 +242,66 @@ class DataTransform:
         # Inverse Fourier Transform to get zero-filled reconstruction (y) and
         # fully-sampled reconstruction (x) in complex (real/imag) form.
         image = transforms.ifft2(masked_kspace)
-        target_cplx = transforms.ifft2(kspace)
+        target = transforms.ifft2(kspace)
 
-        if self.resolution is not None:
-            crop_shape = (self.resolution, self.resolution)
-            image = transforms.complex_center_crop(image, crop_shape)
-            target_cplx = transforms.complex_center_crop(target_cplx, crop_shape)
+        # if self.resolution is not None:
+        #     crop_shape = (self.resolution, self.resolution)
+        #     image = transforms.complex_center_crop(image, crop_shape)
+        #     target_cplx = transforms.complex_center_crop(target_cplx, crop_shape)
 
         # If the dataset provides a precomputed reconstruction target (fastMRI provides
         # `reconstruction_esc`/`reconstruction_rss`), prefer it as ground-truth magnitude.
         # This is the common supervised fastMRI convention and avoids subtle FFT scaling
         # differences across implementations.
-        target_mag = None
-        if target_np is not None:
-            target_mag = transforms.to_tensor(target_np).to(torch.float32)
-            if self.resolution is not None:
-                target_mag = transforms.center_crop(target_mag, (self.resolution, self.resolution))
+        # target_mag = None
+        # if target_np is not None:
+        #     target_mag = transforms.to_tensor(target_np).to(torch.float32)
+        #     if self.resolution is not None:
+        #         target_mag = transforms.center_crop(target_mag, (self.resolution, self.resolution))
 
-        # Absolute value from complex zero-filled image for normalization stats.
-        # Default: per-slice mean(|y|). If vol_abs_mean is provided (volume scaling),
-        # use it so all slices of a volume share the same normalization.
+        # ------------------------------------------------------------------
+        # Complex-domain intensity normalization (Reconformer-style).
+        #
+        # Default: per-slice mean(|y|).
+        #
+        # IMPORTANT: if we are using a *volume_* scale_mode, SliceData caches
+        # `vol_abs_mean` and `vol_scale` computed from y **after dividing by
+        # vol_abs_mean**. In that case we must normalize this slice with the
+        # same vol_abs_mean, otherwise the cached vol_scale will be inconsistent
+        # with the values seen by the model.
+        # ------------------------------------------------------------------
+        eps = 1e-8
+
         abs_image = transforms.complex_abs(image)
         mean = torch.tensor(0.0)
-        eps = 1e-8
-        vol_abs_mean = attrs.get("vol_abs_mean", None) if isinstance(attrs, dict) else None
-        if vol_abs_mean is not None:
-            std = torch.tensor(float(vol_abs_mean))
-        else:
-            std = abs_image.mean()
+
+        std = abs_image.mean()
+        if isinstance(self.scale_mode, str) and self.scale_mode.startswith("volume_"):
+            vol_abs_mean = attrs.get("vol_abs_mean", None) if isinstance(attrs, dict) else None
+            if vol_abs_mean is not None:
+                std = torch.tensor(float(vol_abs_mean), dtype=abs_image.dtype)
         std = torch.clamp(std, min=eps)
 
-        # Normalize complex image (real+imag channels) by a scalar derived from y.
-        # We only need normalized image magnitude for training.
         image = image.permute(2, 0, 1)
-        image = transforms.normalize(image, mean, std, eps=0.0)
+        image = transforms.normalize(image, mean, std, eps=eps)
         image = image.permute(1, 2, 0)
 
-        if target_mag is None:
-            target_cplx = target_cplx.permute(2, 0, 1)
-            target_cplx = transforms.normalize(target_cplx, mean, std, eps=0.0)
-            target_cplx = target_cplx.permute(1, 2, 0)
+        target = target.permute(2, 0, 1)
+        target = transforms.normalize(target, mean, std, eps=eps)
+        target = target.permute(1, 2, 0)
+        # UNTIL HERE IS RECONFORMER
+        
+        if self.resolution is not None:
+            image = transforms.complex_center_crop(image, (self.resolution, self.resolution))
+            target = transforms.complex_center_crop(target, (self.resolution, self.resolution))
 
-        # Build a (1, H, W) magnitude image for each of x (fully sampled) and
-        # y (subsampled / zero-filled), which is what the SwinIR backbone expects.
-        y_mag = transforms.complex_abs(image).unsqueeze(0)
-        if target_mag is not None:
-            # Match normalization path: divide magnitude target by the same denom.
-            x_mag = (target_mag / std).unsqueeze(0)
-        else:
-            x_mag = transforms.complex_abs(target_cplx).unsqueeze(0)
 
-        # Optional extra scaling so that both x and y are divided by a statistic
-        # of the subsampled image y (either its max or a percentile). This keeps
-        # the rest of the pipeline unchanged when scale_mode="none".
+        y_mag = transforms.complex_abs(image)
+        x_mag = transforms.complex_abs(target)
+        x_mag = x_mag.unsqueeze(0)
+        y_mag = y_mag.unsqueeze(0)
+
+
         if self.scale_mode in ("subsample_max", "subsample_percentile", "volume_subsample_max", "volume_subsample_percentile"):
             # Slice-level scaling uses stats from this slice's y.
             # Volume-level scaling uses cached stats provided in attrs (computed from y over the full volume).
@@ -317,7 +324,11 @@ class DataTransform:
 
         sample = {
             "x": x_mag,  # fully sampled magnitude image
-            "y": y_mag,  # subsampled / zero-filled magnitude image
+            "y": y_mag,  # subsampled / zero-filled magnitude image           
+            # For per-scan metrics (scan == one .h5 volume in fastMRI).
+            # `fname` is the volume identifier; `slice` is the slice index inside it.
+            "fname": fname,
+            "slice": slice,
         }
         return sample
 
@@ -466,66 +477,9 @@ class VanillaSliceData(Dataset):
         sample = {
             "x": normalized_image_full,
             "y": normalized_image_sub,
-        }
-        return sample
-
-
-
-class ComplexDataTransform:
-    """
-    Data Transformer with ComplexDataTransform normalization/scaling logic.
-    - std = mean(|y|) computed from zero-filled image y (per-slice)
-    - normalize image (y), target (x), and masked_kspace by the same (mean=0, std)
-    - returns the same tuple structure as DataTransform
-    """
-
-    def __init__(self, resolution, which_challenge, mask_func=None, use_seed=True):
-        if which_challenge not in ("singlecoil", "multicoil"):
-            raise ValueError('Challenge should either be "singlecoil" or "multicoil"')
-        self.mask_func = mask_func
-        self.resolution = resolution
-        self.which_challenge = which_challenge
-        self.use_seed = use_seed
-
-    def __call__(self, kspace, mask, target, attrs, fname, slice):
-        kspace = transforms.to_tensor(kspace)
-
-        # Apply mask (exactly like DataTransform2)
-        if self.mask_func:
-            seed = None if not self.use_seed else tuple(map(ord, fname))
-            masked_kspace, mask = transforms.apply_mask(kspace, self.mask_func, seed)
-        else:
-            masked_kspace = kspace  # (like DataTransform2)
-
-        # IFFT to image space
-        image = transforms.ifft2(masked_kspace)  # zero-filled y
-        target = transforms.ifft2(kspace)        # fully-sampled x
-
-        # Optional center crop (DataTransform2 did not crop; keep if you need it)
-        if self.resolution is not None:
-            crop_shape = (self.resolution, self.resolution)
-            image = transforms.complex_center_crop(image, crop_shape)
-            target = transforms.complex_center_crop(target, crop_shape)
-
-        # Compute normalization stats from |y|
-        abs_image = transforms.complex_abs(image)
-        mean = torch.tensor(0.0)
-        std = abs_image.mean()
-
-        # Normalize image/target/masked_kspace (complex 2-ch) by same std
-        image = image.permute(2, 0, 1)   # (2, H, W)
-        target = target.permute(2, 0, 1) # (2, H, W)
-
-        image = transforms.normalize(image, mean, std, eps=0.0)
-        target = transforms.normalize(target, mean, std, eps=0.0)
-
-        masked_kspace = masked_kspace.permute(2, 0, 1)
-        masked_kspace = transforms.normalize(masked_kspace, mean, std, eps=0.0)
-
-        sample = {
-            "x": target,
-            "y": image,
-            "mean": mean,
-            "std": std,
+            # Keep identifiers consistent with SliceData/DataTransform so that
+            # downstream metrics can group by scan.
+            "fname": fname.name if hasattr(fname, "name") else str(fname),
+            "slice": slice_idx,
         }
         return sample

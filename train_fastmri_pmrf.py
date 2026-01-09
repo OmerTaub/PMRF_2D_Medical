@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader, Dataset, Subset
 import torch
 import os
-from data import SliceData, VanillaSliceData, DataTransform, ComplexDataTransform, create_mask_for_mask_type
+from data import SliceData, VanillaSliceData, DataTransform, create_mask_for_mask_type
 import pathlib
 
 # Ensure project root and PMRF subdir are on sys.path so that
@@ -52,22 +52,33 @@ def _create_dataset(
 ):
     sample_rate = sample_rate if sample_rate is not None else args.sample_rate
 
-    # In our fastMRI setup, data_path already points directly to the directory
+    # In our fastMRI setup, `data_path` already points directly to the directory
     # containing the .h5 files (e.g. /.../singlecoil_train), so we should not
     # append an extra subdirectory such as "train" or "val" here.
-    dataset = SliceData(
-        root=Path(data_path),
-        transform=data_transform,
-        challenge=args.challenge,
-        sequence=sequence,
-        sample_rate=sample_rate,
-    )
-    # dataset = VanillaSliceData(
-    #     root=data_path,
-    #     challenge=args.challenge,
-    #     sample_rate=args.sample_rate,
-    #     mask_func=mask_func,
-    # )
+    #
+    # IMPORTANT (MMSE stage):
+    # - input  is y = subsampled / zero-filled image
+    # - target is x = fully-sampled image
+    # Both `SliceData` (via `DataTransform`) and `VanillaSliceData` return a dict
+    # with keys {"x", "y"} following that convention.
+    dataset_impl = getattr(args, "dataset_impl", "slice")
+    if dataset_impl == "slice":
+        dataset = SliceData(
+            root=Path(data_path),
+            transform=data_transform,
+            challenge=args.challenge,
+            sequence=sequence,
+            sample_rate=sample_rate,
+        )
+    elif dataset_impl == "vanilla":
+        dataset = VanillaSliceData(
+            root=data_path,
+            challenge=args.challenge,
+            sample_rate=sample_rate,
+            mask_func=mask_func,
+        )
+    else:
+        raise ValueError(f"Unknown --dataset_impl '{dataset_impl}'. Expected 'slice' or 'vanilla'.")
     if display:
         dataset = [dataset[i] for i in range(100, 108)]
 
@@ -76,11 +87,18 @@ def _create_dataset(
     # so the core SliceData implementation stays untouched.
     if getattr(args, "overfit_train_file_name", None):
         wanted = args.overfit_train_file_name
-        keep = [
-            i
-            for i, (fname, _slice, _pl, _pr) in enumerate(getattr(dataset, "examples", []))
-            if getattr(fname, "name", str(fname)) == wanted
-        ]
+        def _example_fname(ex):
+            # SliceData stores (fname, slice_idx, padding_left, padding_right)
+            # VanillaSliceData stores (fname, slice_idx)
+            if isinstance(ex, (tuple, list)) and len(ex) >= 1:
+                return ex[0]
+            return ex
+
+        keep = []
+        for i, ex in enumerate(getattr(dataset, "examples", [])):
+            fname = _example_fname(ex)
+            if getattr(fname, "name", str(fname)) == wanted:
+                keep.append(i)
         if len(keep) == 0:
             raise ValueError(
                 f"--overfit_train_file_name='{wanted}' did not match any files in dataset. "
@@ -163,7 +181,7 @@ def main(args):
             args.resolution,
             args.challenge,
             mask,
-            use_seed=True,
+            use_seed=False, # TODO OMER ADDED THIS
             scale_mode=args.scale_mode,
             scale_percentile=args.scale_percentile,
         )
@@ -171,22 +189,10 @@ def main(args):
             args.resolution,
             args.challenge,
             mask,
-            use_seed=True,
+            use_seed=True, 
             scale_mode=args.scale_mode,
             scale_percentile=args.scale_percentile,
         )
-        # train_data_transform = ComplexDataTransform(
-        #     args.resolution,
-        #     args.challenge,
-        #     mask,
-        #     use_seed=True,
-        # )
-        # val_data_transform = ComplexDataTransform(
-        #     args.resolution,
-        #     args.challenge,
-        #     mask,
-        #     use_seed=True,
-        # )
 
         if args.phase == 'train':
             train_loader = _create_dataset(
@@ -207,7 +213,7 @@ def main(args):
                 data_partition="singlecoil_val",
                 sequence=None,
                 bs=args.val_batch_size,
-                shuffle=True,
+                shuffle=False,
                 sample_rate=args.val_sample_rate,
                 mask_func=mask,
             )
@@ -291,6 +297,17 @@ if __name__ == "__main__":
         choices=["singlecoil", "multicoil"],
         default="singlecoil",
         help='fastMRI challenge type (default: "singlecoil").',
+    )
+    parser.add_argument(
+        "--dataset_impl",
+        type=str,
+        choices=["slice", "vanilla"],
+        default="slice",
+        help=(
+            "Which dataset implementation to use. "
+            "'slice' uses `SliceData` + `DataTransform` (recommended). "
+            "'vanilla' uses `VanillaSliceData` (legacy/debug)."
+        ),
     )
     parser.add_argument(
         "--sample_rate",
@@ -449,7 +466,7 @@ if __name__ == "__main__":
         "--arch",
         type=str,
         required=True,
-        choices=["hdit_XL2", "hdit_ImageNet256Sp4", "swinir_M", "swinir_L", "swinir_S"],
+        choices=["hdit_XL2", "hdit_ImageNet256Sp4", "swinir_M", "swinir_L", "swinir_S", "swinir_Denoise"],
         help="Architecture name and size.",
     )
     parser.add_argument(
@@ -488,7 +505,7 @@ if __name__ == "__main__":
         "--num_flow_steps",
         type=int,
         required=False,
-        default=16,
+        default=15,
         help="Number of flow steps for evaluation.",
     )
     parser.add_argument(

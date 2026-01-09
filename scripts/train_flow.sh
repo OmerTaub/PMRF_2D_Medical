@@ -6,12 +6,12 @@ source /storage/omer/PMRF_2D_Medical/scripts/wandb_key.sh
 # Edit these paths and mask settings for your setup
 TRAIN_DATA_ROOT="/storage/omer/data/fastmri/singlecoil_train"
 VAL_DATA_ROOT="/storage/omer/data/fastmri/singlecoil_val"
-MMSE_CKPT="/storage/omer/PMRF_2D_Medical/experiments/fastmri_mmse_experiment_accel_4_center_fraction_04_latest_norm_divide_mean_continue_training_lr_1e-4/epoch=238-step=1037977.ckpt"   # output of train_mmse.sh
+MMSE_CKPT="/storage/omer/PMRF_2D_Medical/experiments/fastmri_mmse_experiment_accel_4_center_fraction_04_reconformer_norm_SWIN_L_continue/epoch=111-step=833856.ckpt"   # output of train_mmse.sh
 
 # Experiment naming and output directory
 # Change EXP_NAME and OUTPUT_DIR per experiment to control run name and
 # where checkpoints/logs are written.
-EXP_NAME="fastmri_flow_experiment_accel_4_center_fraction_04_latest_norm_rectified_flow_lr_1e-4"
+EXP_NAME="fastmri_flow_experiment_accel_4_center_fraction_04_reconformer_norm_SWIN_L_1channel"
 OUTPUT_DIR="experiments_flow/${EXP_NAME}"
 
 # Undersampling mask parameters
@@ -39,7 +39,7 @@ python train_fastmri_pmrf.py \
   --stage "flow" \
   --arch "hdit_XL2" \
   --mmse_model_ckpt_path "$MMSE_CKPT" \
-  --mmse_model_arch "swinir_M" \
+  --mmse_model_arch "swinir_L" \
   --num_flow_steps 32 \
   --num_gpus 1 \
   --train_batch_size 8 \
