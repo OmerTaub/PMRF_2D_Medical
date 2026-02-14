@@ -398,3 +398,130 @@ def ifftshift(x, dim=None):
     else:
         shift = [(x.shape[i] + 1) // 2 for i in dim]
     return roll(x, shift, dim)
+
+
+def complex_center_pad(data, shape):
+    """
+    Apply center zero-padding to a complex image tensor.
+
+    Args:
+        data (torch.Tensor): Complex input tensor of shape (..., H, W, 2).
+        shape (tuple): Target shape (H_target, W_target). Must be >= input shape.
+
+    Returns:
+        torch.Tensor: Zero-padded tensor of shape (..., H_target, W_target, 2).
+    """
+    h_in, w_in = data.shape[-3], data.shape[-2]
+    h_out, w_out = shape
+    assert h_out >= h_in and w_out >= w_in, "Target shape must be >= input shape"
+
+    if h_out == h_in and w_out == w_in:
+        return data
+
+    # Create output tensor filled with zeros
+    out_shape = list(data.shape)
+    out_shape[-3] = h_out
+    out_shape[-2] = w_out
+    out = torch.zeros(out_shape, dtype=data.dtype, device=data.device)
+
+    # Compute padding offsets for center placement
+    h_start = (h_out - h_in) // 2
+    w_start = (w_out - w_in) // 2
+
+    out[..., h_start:h_start + h_in, w_start:w_start + w_in, :] = data
+    return out
+
+
+def apply_data_consistency(
+    xhat: torch.Tensor,
+    kspace: torch.Tensor,
+    mask: torch.Tensor,
+    norm_std: torch.Tensor,
+    norm_scale: torch.Tensor,
+    resolution: int,
+) -> torch.Tensor:
+    """
+    Apply data consistency to predictions by enforcing measured k-space values.
+
+    At measured k-space locations (mask=1), the original measurements are preserved.
+    At unmeasured locations (mask=0), the predicted k-space values are used.
+
+    NOTE: With the updated DataTransform, kspace and mask are now at target resolution
+    (same as xhat), so no padding/cropping is needed. The function handles both cases
+    for backwards compatibility.
+
+    Args:
+        xhat: Normalized prediction tensor of shape (B, 2, H, W).
+              Channel 0 = real, Channel 1 = imaginary.
+        kspace: K-space tensor of shape (B, H, W, 2) at target resolution.
+        mask: Undersampling mask tensor, broadcastable to kspace shape.
+              Typically (B, 1, W, 1) for column-wise undersampling.
+              mask=1 means sampled (measured), mask=0 means not sampled.
+        norm_std: Per-sample normalization factor (B,) - typically mean(|y|).
+        norm_scale: Per-sample additional scaling factor (B,) - typically 1.0 or percentile scale.
+        resolution: The target resolution (H = W = resolution).
+
+    Returns:
+        torch.Tensor: DC-corrected prediction of shape (B, 2, H, W), normalized.
+    """
+    batch_size = xhat.shape[0]
+    device = xhat.device
+    dtype = xhat.dtype
+
+    # Ensure tensors are on the same device and have correct shapes
+    kspace = kspace.to(device=device, dtype=dtype)
+    mask = mask.to(device=device, dtype=dtype)
+
+    # Reshape norm factors for broadcasting: (B,) -> (B, 1, 1, 1)
+    if norm_std.ndim == 0:
+        norm_std = norm_std.unsqueeze(0)
+    if norm_scale.ndim == 0:
+        norm_scale = norm_scale.unsqueeze(0)
+    norm_std = norm_std.to(device=device, dtype=dtype).view(-1, 1, 1, 1)
+    norm_scale = norm_scale.to(device=device, dtype=dtype).view(-1, 1, 1, 1)
+
+    # Get original k-space dimensions
+    h_orig, w_orig = kspace.shape[1], kspace.shape[2]
+    h_crop, w_crop = resolution, resolution
+
+    # Step 1: Unnormalize prediction
+    # xhat is normalized as: xhat_norm = xhat_raw / norm_std / norm_scale
+    # So: xhat_raw = xhat_norm * norm_scale * norm_std
+    xhat_unnorm = xhat * norm_scale * norm_std  # (B, 2, H_crop, W_crop)
+
+    # Step 2: Permute from (B, 2, H, W) to (B, H, W, 2) for FFT functions
+    xhat_unnorm = xhat_unnorm.permute(0, 2, 3, 1)  # (B, H_crop, W_crop, 2)
+
+    # Step 3: Zero-pad to original k-space size if cropped
+    if h_crop != h_orig or w_crop != w_orig:
+        xhat_padded = complex_center_pad(xhat_unnorm, (h_orig, w_orig))
+    else:
+        xhat_padded = xhat_unnorm
+
+    # Step 4: FFT to k-space domain
+    kspace_pred = fft2(xhat_padded)  # (B, H_orig, W_orig, 2)
+
+    # Step 5: Apply data consistency
+    # DC formula: kspace_dc = mask * kspace_original + (1 - mask) * kspace_pred
+    # Where mask=1 means we have measurements, mask=0 means we don't
+    kspace_dc = mask * kspace + (1.0 - mask) * kspace_pred
+
+    # Step 6: IFFT back to image domain
+    image_dc = ifft2(kspace_dc)  # (B, H_orig, W_orig, 2)
+
+    # Step 7: Center-crop back to resolution
+    if h_crop != h_orig or w_crop != w_orig:
+        image_dc = complex_center_crop(image_dc, (h_crop, w_crop))
+
+    # Step 8: Renormalize
+    # Apply the same normalization that was applied to the original data
+    image_dc = image_dc / (norm_std.permute(0, 2, 3, 1) * norm_scale.permute(0, 2, 3, 1))
+
+    # Step 9: Permute back to (B, 2, H, W)
+    image_dc = image_dc.permute(0, 3, 1, 2)  # (B, 2, H_crop, W_crop)
+
+    return image_dc
+
+
+# Alias for complex magnitude computation
+complex_to_magnitude = complex_abs

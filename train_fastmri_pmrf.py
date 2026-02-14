@@ -11,7 +11,7 @@ from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader, Dataset, Subset
 import torch
 import os
-from data import SliceData, VanillaSliceData, DataTransform, create_mask_for_mask_type
+from data import SliceData, DataTransform, create_mask_for_mask_type
 import pathlib
 
 # Ensure project root and PMRF subdir are on sys.path so that
@@ -59,7 +59,7 @@ def _create_dataset(
     # IMPORTANT (MMSE stage):
     # - input  is y = subsampled / zero-filled image
     # - target is x = fully-sampled image
-    # Both `SliceData` (via `DataTransform`) and `VanillaSliceData` return a dict
+    # Both `SliceData` (via `DataTransform`) return a dict
     # with keys {"x", "y"} following that convention.
     dataset_impl = getattr(args, "dataset_impl", "slice")
     if dataset_impl == "slice":
@@ -70,26 +70,20 @@ def _create_dataset(
             sequence=sequence,
             sample_rate=sample_rate,
         )
-    elif dataset_impl == "vanilla":
-        dataset = VanillaSliceData(
-            root=data_path,
-            challenge=args.challenge,
-            sample_rate=sample_rate,
-            mask_func=mask_func,
-        )
     else:
-        raise ValueError(f"Unknown --dataset_impl '{dataset_impl}'. Expected 'slice' or 'vanilla'.")
+        raise ValueError(f"Unknown --dataset_impl '{dataset_impl}'. Expected 'slice'.")
     if display:
         dataset = [dataset[i] for i in range(100, 108)]
 
     # ---------------- debugging / overfitting helpers ----------------
     # These are intentionally applied only at the DataLoader construction level,
     # so the core SliceData implementation stays untouched.
-    if getattr(args, "overfit_train_file_name", None):
+    # Only apply overfitting filters to training data (identified by shuffle=True).
+    is_train = shuffle
+    if is_train and getattr(args, "overfit_train_file_name", None):
         wanted = args.overfit_train_file_name
         def _example_fname(ex):
             # SliceData stores (fname, slice_idx, padding_left, padding_right)
-            # VanillaSliceData stores (fname, slice_idx)
             if isinstance(ex, (tuple, list)) and len(ex) >= 1:
                 return ex[0]
             return ex
@@ -107,7 +101,7 @@ def _create_dataset(
         dataset = Subset(dataset, keep)
         shuffle = False
 
-    if getattr(args, "overfit_first_n_slices", None) is not None:
+    if is_train and getattr(args, "overfit_first_n_slices", None) is not None:
         n = int(args.overfit_first_n_slices)
         if n <= 0:
             raise ValueError("--overfit_first_n_slices must be > 0")
@@ -115,7 +109,7 @@ def _create_dataset(
         dataset = Subset(dataset, list(range(n)))
         shuffle = False
 
-    if getattr(args, "overfit_single_slice_index", None) is not None:
+    if is_train and getattr(args, "overfit_single_slice_index", None) is not None:
         idx = int(args.overfit_single_slice_index)
         if idx < 0 or idx >= len(dataset):
             raise ValueError(
@@ -130,6 +124,7 @@ def _create_dataset(
         shuffle=shuffle,
         pin_memory=True,
         num_workers=args.num_workers,
+        persistent_workers=True if not shuffle else False,
     )
 
 
@@ -175,23 +170,34 @@ def main(args):
 
 
     if args.challenge == 'singlecoil':
-        mask = create_mask_for_mask_type(args.mask_type, args.center_fractions,
-                                         args.accelerations)
+        # Resolve validation mask type: default to training mask type if not specified.
+        val_mask_type = args.val_mask_type if args.val_mask_type is not None else args.mask_type
+
+        train_mask = create_mask_for_mask_type(args.mask_type, args.center_fractions,
+                                               args.accelerations)
+        val_mask = create_mask_for_mask_type(val_mask_type, args.center_fractions,
+                                             args.accelerations)
+
+        print(f"Train mask type: {args.mask_type} (use_seed=False → different mask each batch)")
+        print(f"Val   mask type: {val_mask_type} (use_seed=True  → same mask per volume)")
+
         train_data_transform = DataTransform(
             args.resolution,
             args.challenge,
-            mask,
-            use_seed=False, # TODO OMER ADDED THIS
+            train_mask,
+            use_seed=False,  # random mask each batch for training
             scale_mode=args.scale_mode,
             scale_percentile=args.scale_percentile,
+            include_dc_data=True,
         )
         val_data_transform = DataTransform(
             args.resolution,
             args.challenge,
-            mask,
-            use_seed=True, 
+            val_mask,
+            use_seed=True,   # deterministic mask per volume for validation
             scale_mode=args.scale_mode,
             scale_percentile=args.scale_percentile,
+            include_dc_data=True,  # Include DC data for validation metrics
         )
 
         if args.phase == 'train':
@@ -204,7 +210,7 @@ def main(args):
                 bs=args.train_batch_size,
                 shuffle=True,
                 sample_rate=args.sample_rate,
-                mask_func=mask,
+                mask_func=train_mask,
             )
             val_loader = _create_dataset(
                 args=args,
@@ -215,7 +221,7 @@ def main(args):
                 bs=args.val_batch_size,
                 shuffle=False,
                 sample_rate=args.val_sample_rate,
-                mask_func=mask,
+                mask_func=val_mask,
             )
     else:
         exit('Error: unrecognized challenge')
@@ -236,6 +242,9 @@ def main(args):
         check_val_every_n_epoch=args.check_val_every_n_epoch,
     )
 
+    # Resolve gauge JVP flag: --no_gauge_jvp overrides --use_gauge_jvp
+    use_gauge_jvp = args.use_gauge_jvp and not args.no_gauge_jvp
+
     with trainer.init_module():
         model = MMSERectifiedFlow(
             stage=args.stage,
@@ -246,15 +255,71 @@ def main(args):
             weight_decay=args.weight_decay,
             betas=args.betas,
             mmse_noise_std=args.source_noise_std,
+            mmse_noise_std_max=args.source_noise_std_max,
             mmse_model_arch=args.mmse_model_arch,
             num_flow_steps=args.num_flow_steps,
             ema_decay=args.ema_decay,
             eps=args.eps,
             t_schedule=args.t_schedule,
+            lr_scheduler_patience=args.lr_scheduler_patience,
+            apply_dc_to_source=args.apply_dc_to_source,
             colorization=False,
+            # ENGRF gauge_flow params
+            gauge_strength=args.gauge_strength,
+            gauge_base_channels=args.gauge_base_channels,
+            gauge_num_levels=args.gauge_num_levels,
+            use_gauge_jvp=use_gauge_jvp,
+            freeze_flow_model=args.freeze_flow_model,
         )
 
-    # model = torch.compile(model, mode="default") # TODO OMER ADDED THIS
+    # Load pretrained weights with strict=False (for architecture changes like 1ch -> 2ch)
+    if args.load_pretrained is not None:
+        print(f"Loading pretrained weights from: {args.load_pretrained}")
+        ckpt = torch.load(args.load_pretrained, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+        
+        model_state = model.state_dict()
+
+        # If no keys match directly (e.g. raw ReconFormer .pth checkpoint without
+        # the Lightning "model." prefix), try common prefix mappings.
+        direct_hits = sum(1 for k in state_dict if k in model_state)
+        if direct_hits == 0 and len(state_dict) > 0:
+            # Try prepending "model." (Lightning wraps the network as self.model)
+            prefixed = {f"model.{k}": v for k, v in state_dict.items()}
+            if sum(1 for k in prefixed if k in model_state) > 0:
+                print("  Auto-prefixed checkpoint keys with 'model.' for Lightning compatibility")
+                state_dict = prefixed
+
+        # Filter out keys with shape mismatch (strict=False doesn't handle size mismatches)
+        filtered_state_dict = {}
+        skipped_keys = []
+        for k, v in state_dict.items():
+            if k in model_state:
+                if v.shape == model_state[k].shape:
+                    filtered_state_dict[k] = v
+                else:
+                    skipped_keys.append(f"{k}: ckpt {v.shape} vs model {model_state[k].shape}")
+            else:
+                skipped_keys.append(f"{k}: not in model")
+        
+        missing, unexpected = model.load_state_dict(filtered_state_dict, strict=False)
+        print(f"  Loaded {len(filtered_state_dict)} / {len(state_dict)} keys")
+        if skipped_keys:
+            print(f"  Skipped keys due to shape mismatch ({len(skipped_keys)}):")
+            for sk in skipped_keys[:10]:
+                print(f"    - {sk}")
+            if len(skipped_keys) > 10:
+                print(f"    ... and {len(skipped_keys) - 10} more")
+        if missing:
+            print(f"  Missing keys in model ({len(missing)}):")
+            for mk in missing[:10]:
+                print(f"    - {mk}")
+            if len(missing) > 10:
+                print(f"    ... and {len(missing) - 10} more")
+        print("  Pretrained weights loaded (strict=False, mismatched shapes skipped)")
+
+    # model = torch.compile(model, mode="default")
+
     trainer.fit(
         model=model,
         train_dataloaders=train_loader,
@@ -301,12 +366,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_impl",
         type=str,
-        choices=["slice", "vanilla"],
+        choices=["slice"],
         default="slice",
         help=(
             "Which dataset implementation to use. "
             "'slice' uses `SliceData` + `DataTransform` (recommended). "
-            "'vanilla' uses `VanillaSliceData` (legacy/debug)."
         ),
     )
     parser.add_argument(
@@ -356,7 +420,17 @@ if __name__ == "__main__":
         type=str,
         default="random",
         choices=["random", "equispaced"],
-        help="Type of synthetic undersampling mask.",
+        help="Type of synthetic undersampling mask for training.",
+    )
+    parser.add_argument(
+        "--val_mask_type",
+        type=str,
+        default=None,
+        choices=["random", "equispaced"],
+        help=(
+            "Type of synthetic undersampling mask for validation. "
+            "If not specified, defaults to --mask_type."
+        ),
     )
     parser.add_argument('--accelerations', nargs='+', default=[4], type=int,
                       help='Ratio of k-space columns to be sampled. If multiple values are '
@@ -413,7 +487,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--scale_mode",
         type=str,
-        default="subsample_max",
+        default="none",
         choices=[
             "none",
             "subsample_max",
@@ -451,12 +525,13 @@ if __name__ == "__main__":
         "--stage",
         type=str,
         required=True,
-        choices=["mmse", "flow", "naive_flow"],
+        choices=["mmse", "flow", "naive_flow", "gauge_flow"],
         help="The stage of the model.",
     )
     parser.add_argument(
         "--conditional",
         action="store_true",
+        default=False,
         help=(
             "If set, the flow model is conditioned on either y or the posterior "
             "mean predictor. Applies only to the stage 'flow'."
@@ -466,7 +541,7 @@ if __name__ == "__main__":
         "--arch",
         type=str,
         required=True,
-        choices=["hdit_XL2", "hdit_ImageNet256Sp4", "swinir_M", "swinir_L", "swinir_S", "swinir_Denoise"],
+        choices=["hdit_XL2", "hdit_L2", "hdit_ImageNet256Sp4", "swinir_M", "swinir_L", "swinir_S", "swinir_Denoise", "reconformer_S"],
         help="Architecture name and size.",
     )
     parser.add_argument(
@@ -501,6 +576,87 @@ if __name__ == "__main__":
             "(sigma_s in the paper). Applies only to PMRF and naive flow."
         ),
     )
+    parser.add_argument(
+        "--source_noise_std_max",
+        type=float,
+        required=False,
+        default=None,
+        help=(
+            "Max noise std for uniform sampling. If set, samples uniformly from "
+            "[source_noise_std, source_noise_std_max] per batch."
+        ),
+    )
+    parser.add_argument(
+        "--apply_dc_to_source",
+        action="store_true",
+        help=(
+            "If set, apply data consistency (DC) to the MMSE posterior mean before "
+            "using it as the source distribution input to the flow model. This enforces "
+            "the measured k-space frequencies from the subsampled y data on the MMSE output. "
+            "Applies only to the stage 'flow'."
+        ),
+    )
+    parser.add_argument(
+        "--train_with_dc",
+        action="store_true",
+        help="DEPRECATED: This flag is ignored. DC in the training loop causes gradient "
+             "death at measured k-space locations, leading to model divergence. "
+             "Use DC only as post-processing at validation/inference (psnr_per_scan_dc).",
+    )
+    # ---------------- ENGRF gauge_flow options ----------------
+    parser.add_argument(
+        "--gauge_strength",
+        type=float,
+        default=0.1,
+        help=(
+            "Strength of the gauge bump function alpha(t) = gauge_strength * sin^2(pi*t). "
+            "Controls the magnitude of the gauge displacement. Only used with --stage gauge_flow."
+        ),
+    )
+    parser.add_argument(
+        "--gauge_base_channels",
+        type=int,
+        default=32,
+        help=(
+            "Base channel width of the gauge network U-Net. Channels double at each level. "
+            "Only used with --stage gauge_flow."
+        ),
+    )
+    parser.add_argument(
+        "--gauge_num_levels",
+        type=int,
+        default=3,
+        help=(
+            "Number of encoder/decoder levels in the gauge network U-Net. "
+            "Only used with --stage gauge_flow."
+        ),
+    )
+    parser.add_argument(
+        "--use_gauge_jvp",
+        action="store_true",
+        default=True,
+        help=(
+            "Include Jacobian-vector product correction in gauge target. "
+            "Requires 2 extra lightweight gauge_net forward passes per step. "
+            "Only used with --stage gauge_flow."
+        ),
+    )
+    parser.add_argument(
+        "--no_gauge_jvp",
+        action="store_true",
+        default=False,
+        help="Disable the Jacobian-vector product correction (overrides --use_gauge_jvp).",
+    )
+    parser.add_argument(
+        "--freeze_flow_model",
+        action="store_true",
+        default=False,
+        help=(
+            "Freeze the velocity network and train only the gauge network. "
+            "Only used with --stage gauge_flow."
+        ),
+    )
+
     parser.add_argument(
         "--num_flow_steps",
         type=int,
@@ -599,6 +755,13 @@ if __name__ == "__main__":
         help="Betas for the AdamW optimizer.",
     )
     parser.add_argument(
+        "--lr_scheduler_patience",
+        type=int,
+        required=False,
+        default=50,
+        help="Patience for ReduceLROnPlateau scheduler.",
+    )
+    parser.add_argument(
         "--wandb_project_name",
         type=str,
         required=True,
@@ -631,7 +794,18 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default=None,
-        help="Optional checkpoint path to resume training.",
+        help="Optional checkpoint path to resume training (full Lightning checkpoint).",
+    )
+    parser.add_argument(
+        "--load_pretrained",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "Load pretrained model weights with strict=False. Use this when architecture "
+            "has changed (e.g., 1-channel to 2-channel). Only loads compatible weights; "
+            "mismatched layers are randomly initialized. Does NOT resume optimizer state."
+        ),
     )
     parser.add_argument(
         "--output_dir",

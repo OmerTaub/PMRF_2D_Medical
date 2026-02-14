@@ -14,6 +14,8 @@ def create_mask_for_mask_type(mask_type_str, center_fractions, accelerations):
         return RandomMaskFunc(center_fractions, accelerations)
     elif mask_type_str == 'equispaced':
         return EquispacedMaskFunc(center_fractions, accelerations)
+    elif mask_type_str == 'center_only':
+        return CenterOnlyMaskFunc(center_fractions)
     else:
         raise Exception(f"{mask_type_str} not supported")
 
@@ -161,6 +163,65 @@ class EquispacedMaskFunc(MaskFunc):
         accel_samples = np.arange(offset, num_cols - 1, adjusted_accel)
         accel_samples = np.around(accel_samples).astype(np.uint)
         mask[accel_samples] = True
+
+        # Reshape the mask
+        mask_shape = [1 for _ in shape]
+        mask_shape[-2] = num_cols
+        mask = torch.from_numpy(mask.reshape(*mask_shape).astype(np.float32))
+
+        return mask
+
+
+class CenterOnlyMaskFunc:
+    """
+    CenterOnlyMaskFunc creates a sub-sampling mask that ONLY retains the center (low-frequency)
+    portion of k-space, without any additional random or equispaced sampling.
+
+    This is useful for comparing the effect of having only low-frequency information
+    versus having both center + high-frequency samples.
+
+    For a k-space with N columns, the mask keeps:
+        N_low_freqs = round(N * center_fraction) columns in the center
+    
+    All other columns are set to zero (not sampled).
+    """
+
+    def __init__(self, center_fractions):
+        """
+        Args:
+            center_fractions (List[float]): Fraction of low-frequency columns to be retained.
+                If multiple values are provided, then one of these numbers is chosen uniformly
+                each time.
+        """
+        self.center_fractions = center_fractions
+        self.rng = np.random.RandomState()
+
+    def choose_center_fraction(self):
+        choice = self.rng.randint(0, len(self.center_fractions))
+        return self.center_fractions[choice]
+
+    def __call__(self, shape, seed=None):
+        """
+        Args:
+            shape (iterable[int]): The shape of the mask to be created. The shape should have
+                at least 3 dimensions. Samples are drawn along the second last dimension.
+            seed (int, optional): Seed for the random number generator. Setting the seed
+                ensures the same mask is generated each time for the same shape.
+        Returns:
+            torch.Tensor: A mask of the specified shape with only center columns set to 1.
+        """
+        if len(shape) < 3:
+            raise ValueError('Shape should have 3 or more dimensions')
+
+        self.rng.seed(seed)
+        num_cols = shape[-2]
+        center_fraction = self.choose_center_fraction()
+
+        # Create the mask - only center frequencies
+        num_low_freqs = int(round(num_cols * center_fraction))
+        mask = np.zeros(num_cols, dtype=np.float32)
+        pad = (num_cols - num_low_freqs + 1) // 2
+        mask[pad:pad + num_low_freqs] = 1.0
 
         # Reshape the mask
         mask_shape = [1 for _ in shape]

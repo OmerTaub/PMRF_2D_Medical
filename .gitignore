@@ -55,13 +55,25 @@ checkpoints/*.ckpt
 wandb/
 experiments/
 experiments_flow/
+experiments_gauge/
+experiments_mmse/
 
 # Local secrets (never commit)
 scripts/wandb_key.sh
 
 ########################
+# IDE
+########################
+.cursor/
+
+########################
+# Local-only directories
+########################
+tests/
+vis_output/
+
+########################
 # Misc
 ########################
 *.ipynb_checkpoints/
-
-
+engrf_implementaion.md
